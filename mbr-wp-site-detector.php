@@ -3,7 +3,7 @@
  * Plugin Name: MBR WP Site Detector
  * Plugin URI: https://littlewebshack.com/
  * Description: Detects if a website is built with WordPress and identifies the theme and plugins being used
- * Version: 1.6.1
+ * Version: 1.7.0
  * Author: Robert Palmer
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -30,7 +30,7 @@ add_filter( 'plugin_row_meta', function ( $links, $file, $data ) {
 /* =========================================================
    Constants
 ========================================================= */
-define('WP_SITE_DETECTOR_VERSION',        '1.6.1');
+define('WP_SITE_DETECTOR_VERSION',        '1.7.0');
 define('WP_SITE_DETECTOR_PLUGIN_DIR',     plugin_dir_path(__FILE__));
 define('WP_SITE_DETECTOR_PLUGIN_URL',     plugin_dir_url(__FILE__));
 define('WP_SITE_DETECTOR_DEFAULT_COLOR',  '#0073aa');
@@ -417,16 +417,23 @@ CSS;
     private function detect_theme($html, $url) {
         if (preg_match('/\/wp-content\/themes\/([^\/\'"]+)/i', $html, $m)) {
             $slug = $m[1];
-            $name = $this->get_theme_name($url, $slug);
-            return ['name' => $name ?: ucwords(str_replace(['-','_'], ' ', $slug)), 'slug' => $slug, 'url' => 'https://wordpress.org/themes/'.$slug.'/'];
+            $info = $this->get_theme_info($url, $slug);
+            $name = $info['name'] ?: ucwords(str_replace(['-','_'], ' ', $slug));
+            $theme_url = $info['uri'] ?: 'https://wordpress.org/themes/'.$slug.'/';
+            return ['name' => $name, 'slug' => $slug, 'url' => $theme_url];
         }
         return ['name' => 'Unknown (Possibly a custom built theme)', 'slug' => 'unknown', 'url' => null];
     }
 
-    private function get_theme_name($site_url, $slug) {
+    private function get_theme_info($site_url, $slug) {
+        $info = ['name' => null, 'uri' => null];
         $r = wp_remote_get(trailingslashit($site_url).'wp-content/themes/'.$slug.'/style.css', ['timeout' => 10, 'sslverify' => false]);
-        if (!is_wp_error($r)) { $css = wp_remote_retrieve_body($r); if (preg_match('/Theme Name:\s*(.+)/i', $css, $m)) return trim($m[1]); }
-        return null;
+        if (!is_wp_error($r)) {
+            $css = wp_remote_retrieve_body($r);
+            if (preg_match('/Theme Name:\s*(.+)/i', $css, $m)) $info['name'] = trim($m[1]);
+            if (preg_match('/Theme URI:\s*(https?:\/\/\S+)/i', $css, $m)) $info['uri'] = trim($m[1]);
+        }
+        return $info;
     }
 
     private function detect_plugins($html, $url) {
@@ -439,17 +446,89 @@ CSS;
                 $version = isset($m[2][$i]) && $m[2][$i] !== '' ? $m[2][$i] : null;
                 // Keep entry if we haven't seen this slug, or if we now have a version and didn't before
                 if (!isset($seen[$slug]) || ($version && !$seen[$slug]['version'])) {
+                    $info = $this->get_plugin_info($slug);
                     $seen[$slug] = [
-                        'name'    => ucwords(str_replace(['-','_'], ' ', $slug)),
+                        'name'    => $info['name'],
                         'slug'    => $slug,
                         'version' => $version,
-                        'url'     => 'https://wordpress.org/plugins/'.$slug.'/',
+                        'url'     => $info['url'],
+                        'icon'    => $info['icon'],
                     ];
                 }
             }
             $plugins = array_values($seen);
         }
         return $plugins;
+    }
+
+    /**
+     * Fetch plugin name, homepage (Plugin URI) and icon from the wordpress.org plugin API.
+     * Cached per-slug for 12 hours.
+     *
+     * Resolution order for the URL:
+     *   1. Plugin homepage from API (the Plugin URI header)
+     *   2. wordpress.org/plugins/{slug}/  — only when the API confirms the plugin
+     *      exists in the repo but supplies no homepage
+     *   3. Google search for the slug — when the plugin is not in the repo, or
+     *      the API is unreachable
+     *
+     * Icon priority: svg > 2x > 1x > default (auto-generated geopattern).
+     * Returns null icon when the plugin is not in the repo.
+     */
+    private function get_plugin_info($slug) {
+        $slug_key  = sanitize_key($slug);
+        $cache_key = 'mbr_wpsd_plug_' . $slug_key;
+
+        $cached = get_transient($cache_key);
+        if (is_array($cached) && array_key_exists('name', $cached) && array_key_exists('url', $cached) && array_key_exists('icon', $cached)) {
+            return $cached;
+        }
+
+        // Default fallback: slug-derived name + Google search URL + no icon
+        $result = [
+            'name' => ucwords(str_replace(['-','_'], ' ', $slug)),
+            'url'  => 'https://www.google.com/search?q=' . rawurlencode($slug_key),
+            'icon' => null,
+        ];
+
+        $api_url  = 'https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]=' . rawurlencode($slug_key) . '&request[fields][icons]=1';
+        $response = wp_remote_get($api_url, ['timeout' => 3, 'sslverify' => false]);
+
+        if (!is_wp_error($response) && (int) wp_remote_retrieve_response_code($response) === 200) {
+            $data = json_decode(wp_remote_retrieve_body($response), true);
+            if (is_array($data) && empty($data['error'])) {
+                // Plugin confirmed in repo
+                if (!empty($data['name'])) {
+                    $result['name'] = sanitize_text_field(html_entity_decode($data['name'], ENT_QUOTES, 'UTF-8'));
+                }
+                if (!empty($data['homepage'])) {
+                    $homepage = esc_url_raw($data['homepage']);
+                    if ($homepage) {
+                        $result['url'] = $homepage;
+                    } else {
+                        $result['url'] = 'https://wordpress.org/plugins/' . $slug_key . '/';
+                    }
+                } else {
+                    $result['url'] = 'https://wordpress.org/plugins/' . $slug_key . '/';
+                }
+
+                // Icon: prefer svg > 2x > 1x > default geopattern
+                if (!empty($data['icons']) && is_array($data['icons'])) {
+                    foreach (['svg', '2x', '1x', 'default'] as $key) {
+                        if (!empty($data['icons'][$key])) {
+                            $icon_url = esc_url_raw($data['icons'][$key]);
+                            if ($icon_url) {
+                                $result['icon'] = $icon_url;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        set_transient($cache_key, $result, 12 * HOUR_IN_SECONDS);
+        return $result;
     }
 
     private function detect_wp_version($html) {

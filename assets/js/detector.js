@@ -136,7 +136,7 @@ jQuery(document).ready(function($) {
             html += '<div class="result-section">' +
                         '<h5>Active Theme</h5>' +
                         '<div class="result-item">' +
-                            '<div class="result-item-icon">🎨</div>' +
+                            '<div class="result-item-icon is-emoji">🎨</div>' +
                             '<div class="result-item-content">' +
                                 '<div class="result-item-name">' + escapeHtml(data.theme.name) + '</div>' +
                                 '<div class="result-item-slug">' + escapeHtml(data.theme.slug) + '</div>' +
@@ -153,8 +153,11 @@ jQuery(document).ready(function($) {
                 var versionBadge = plugin.version
                     ? '<span class="result-item-version">v' + escapeHtml(plugin.version) + '</span>'
                     : '';
+                var iconHtml = plugin.icon
+                    ? '<div class="result-item-icon"><img src="' + escapeHtml(plugin.icon) + '" alt="" loading="lazy" onerror="this.parentNode.classList.add(\'is-emoji\');this.parentNode.innerHTML=\'🔌\';"></div>'
+                    : '<div class="result-item-icon is-emoji">🔌</div>';
                 html += '<div class="result-item">' +
-                            '<div class="result-item-icon">🔌</div>' +
+                            iconHtml +
                             '<div class="result-item-content">' +
                                 '<div class="result-item-name">' + escapeHtml(plugin.name) + '</div>' +
                                 '<div class="result-item-slug">' + escapeHtml(plugin.slug) + versionBadge + '</div>' +
